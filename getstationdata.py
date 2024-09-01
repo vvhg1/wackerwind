@@ -73,20 +73,11 @@ def get_station_data(
 
 def main():
     now = datetime.datetime.now()
-    one_year_ago = now - datetime.timedelta(days=365)
-    yesterday = now - datetime.timedelta(days=1)
-    hours_to_show = 10
-    df = get_station_data(yesterday, now)
+    hours_to_show = 100
+    from_time = now - datetime.timedelta(hours=hours_to_show)
+    df = get_station_data(from_time, now)
 
     print(df[10:].to_string())
-    # df["datetime"] = df["datetime"] + pd.Timedelta(seconds=tz_offset)
-    # df["datetime"] = pd.to_datetime(df["datetime"].dt.strftime("%Y-%m-%dT%H:%M:%S"))
-    # df["datetime"] = pd.to_datetime(df["date"])
-    # save as csv
-    # df.to_csv("windguru.csv")
-
-    # Print the dataframe
-    # print(df.to_string())
 
     # here we show the last 20 hours, not the first 20 hours
     x_labels = generate_labels(df["datetime"][-hours_to_show * 60 :])
@@ -140,7 +131,6 @@ def main():
     plt.title("Station Wind Data")
     plt.xlabel("Time")
     plt.ylabel("Wind Speed [kn]")
-    # show the plot
     plt.show()
 
 
