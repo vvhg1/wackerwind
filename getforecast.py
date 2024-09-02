@@ -33,6 +33,7 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
     retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
     openmeteo = openmeteo_requests.Client(session=retry_session)
 
+    models = ["arome_france_hd", "icon_d2", "metno_seamless"]
     # parse the location
     # match anything starting with wack to a specific location
     if location.lower().startswith("wac") or location.lower().startswith("wak"):
@@ -70,8 +71,8 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
         "forecast_minutely_15": hours_to_show * 4,
         "timeformat": "unixtime",
         "timezone": "Europe/Berlin",
-        # "models": ["arome_france_hd", "icon_d2", "metno_seamless"],
-        "models": ["icon_d2"],
+        "models": models,
+        # "models": ["icon_d2"],
     }
     numbers_to_models = {
         11: "arome_france_hd",  # 1.5km, quarter hourly, every hour updated
@@ -80,6 +81,7 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
     }
     responses = openmeteo.weather_api(url, params=params)
 
+    mse_df = pd.DataFrame()
     # Process first location. Add a for-loop for multiple locations or weather models
     for response in responses:
         print(f"\nModel {numbers_to_models[response.Model()]}")
@@ -162,18 +164,80 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
             station_data = get_station_data(from_time, now, sliding_window=15)
             # combine the two dataframes, we need to match the time, if the station data is missing, use the last value before the time being processed
             df.set_index("datetime", inplace=True)
-            station_data.set_index("datetime", inplace=True)
-            station_data_reindexed = station_data.reindex(df.index, method="backfill")
+            station_data.set_index("datetime", inplace=False)
+            station_data_reindexed = station_data.reindex(df.index, method=None)
+            # where we have no measurements, get the closest measurement from station_data, but only if the measurement is not older than the previous datetime in station_data_reindexed
+            new_station_data = pd.DataFrame(columns=station_data_reindexed.columns)
+
+            for idx, row in station_data_reindexed.iterrows():
+                if pd.isna(row["wind_avg"]):
+                    this_datetime = row.name
+                    # get the last datetime in station_data that is older than this datetime
+                    station_data_row = (
+                        station_data.loc[station_data["datetime"] < this_datetime]
+                        .sort_values(by="datetime")
+                        .tail(1)
+                    )
+                    if station_data_row.empty:
+                        df.drop(idx, inplace=True)
+                        station_data_reindexed.drop(idx, inplace=True)
+                        continue
+                    if this_datetime > now:
+                        # add a nan to the dataframe
+                        new_station_data.loc[idx, "smooth_wind_avg"] = pd.NA
+                        new_station_data.loc[idx, "smooth_wind_min"] = pd.NA
+                        new_station_data.loc[idx, "smooth_wind_max"] = pd.NA
+                        continue
+                    time_difference = (
+                        this_datetime - station_data_row.iloc[0]["datetime"]
+                    )
+                    # if it is more than 15 minutes old
+                    if time_difference > pd.Timedelta(minutes=15):
+                        df.drop(idx, inplace=True)
+                        continue
+                    row = station_data_row.iloc[0]
+                    # add the row to the dataframe
+                    new_station_data.loc[idx] = row
+            station_data_reindexed = new_station_data
+            
             df = df.join(station_data_reindexed["smooth_wind_avg"])
             df = df.join(station_data_reindexed["smooth_wind_min"])
             df = df.join(station_data_reindexed["smooth_wind_max"])
-            print(df.to_string())
             df.reset_index(inplace=True)
+            print(df.to_string())
+            if mse_df.empty:
+                mse_df["datetime"] = df["datetime"]
+                mse_df["date"] = df["date"]
+                mse_df["time"] = df["time"]
+            mse_df["wind_speed_10m"] = df["wind_speed_10m"]
+            mse_df["smooth_wind_avg"] = df["smooth_wind_avg"]
+            mse_df["wind_gusts_10m"] = df["wind_gusts_10m"]
+            mse_df["smooth_wind_max"] = df["smooth_wind_max"]
+
+            # calculate the mean squared error
+            mse_df = mse_df[mse_df["smooth_wind_avg"].notna()]
+            mse_df[f"mse_wind_{numbers_to_models[response.Model()]}"] = (
+                mse_df["wind_speed_10m"] - mse_df["smooth_wind_avg"]
+            ) ** 2
+            mse_df[f"mse_wind_gusts_{numbers_to_models[response.Model()]}"] = (
+                mse_df["wind_gusts_10m"] - mse_df["smooth_wind_max"]
+            ) ** 2
+            mse_df[f"mse_{numbers_to_models[response.Model()]}"] = (
+                mse_df[f"mse_wind_{numbers_to_models[response.Model()]}"]
+                # + mse_df[f"mse_wind_gusts_{numbers_to_models[response.Model()]}"]
+            )
+            # smooth over the last 10 data points
+            mse_df[f"mse_smooth_{numbers_to_models[response.Model()]}"] = (
+                mse_df[f"mse_{numbers_to_models[response.Model()]}"]
+                .rolling(10, min_periods=1)
+                .mean()
+            )
+
             x_labels = generate_labels(df["datetime"][::4])
             tick_positions = df["datetime"][::4]
             tick_labels = x_labels
             # plot the wind speed and gusts in one plot
-            plt.figure(figsize=(10, 5))
+            plt.figure(figsize=(30, 5))
             plt.plot(
                 df["datetime"],
                 df["wind_speed_10m"],
@@ -209,6 +273,13 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
                 linestyle="solid",
                 color="green",
             )
+            plt.plot(
+                mse_df["datetime"],
+                mse_df[f"mse_smooth_{numbers_to_models[response.Model()]}"],
+                label=f"MSE {numbers_to_models[response.Model()]}",
+                linestyle="dotted",
+                color="black",
+            )
             # add gridlines
             plt.grid(True)
             plt.xticks(tick_positions, tick_labels, rotation=45, ha="right", va="top")
@@ -218,6 +289,31 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
             plt.ylabel("Wind Speed [kn]")
             # show the plot
             plt.show()
+
+    # print(mse_df.to_string())
+    # total mse
+    # cap the mse at 20
+    for i, model in enumerate(models):
+        total_mse = mse_df[f"mse_{model}"].clip(upper=20).sum()
+        print(f"Total MSE for {model}: {total_mse}")
+    # plot the mean squared error
+    plt.figure(figsize=(10, 5))
+    colors = ["red", "blue", "green"]
+    for i, model in enumerate(models):
+        plt.plot(
+            mse_df["datetime"],
+            mse_df[f"mse_smooth_{model}"],
+            label=f"{model}",
+            linestyle="dashed",
+            color=colors[i],
+        )
+    # Add plot details
+    plt.xlabel("Date")
+    plt.ylabel("Mean Squared Error")
+    plt.title("MSE for Different Models Over Time")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
 
 def parse_args():

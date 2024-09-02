@@ -62,6 +62,7 @@ def get_station_data(
     df = pd.DataFrame(station_data)
     # wiind_avg and wind_min are mixed up
     df = df.rename(columns={"wind_avg": "wind_min", "wind_min": "wind_avg"})
+    print(df.to_string())
     df["datetime"] = pd.to_datetime(df["datetime"])
     df["date"] = df["datetime"].dt.date
     df["time"] = df["datetime"].dt.time
