@@ -110,7 +110,8 @@ def save_forecast(location, hours_to_show):
 
             # drop anything that is in the past
             now = datetime.datetime.now()
-            df = df[df["datetime"] > now]
+            df = df[df["datetime"] > now - pd.Timedelta(minutes=2)]
+            print(df)
 
             # we drop anything where the wind_speed_10m is nan
             df = df[df["wind_speed_10m"].notna()]
@@ -122,35 +123,71 @@ def save_forecast(location, hours_to_show):
             if os.path.exists(
                 f"{save_path}{location}_{numbers_to_models[response.Model()]}_{countdown}.h5"
             ):
-                with pd.HDFStore(
-                    f"{save_path}{location}_{numbers_to_models[response.Model()]}_{countdown}.h5"
-                ) as store:
-                    temp_df = store["data"]
-                    # turn the datetime into a datetime
-                    temp_df["datetime"] = pd.to_datetime(temp_df["datetime"])
-                    # we check if the last forecast time is the same as the previous last forecast time
-                    prev_last_forecast_time = temp_df["datetime"].max()
-                    if last_forecast_time == prev_last_forecast_time:
-                        continue
-
-            while df.empty == False:
-                # we get the last four values as that is the hours_to_show's hour in the future
-                this_hour_df = df.tail(4).copy()
-                # turn the datetime into a string
-                this_hour_df["datetime"] = this_hour_df["datetime"].dt.strftime(
-                    "%Y-%m-%dT%H:%M:%S"
-                )
-                # we save the current hourly data to hdf5
-                with pd.HDFStore(
-                    f"{save_path}{location}_{numbers_to_models[response.Model()]}_{countdown}.h5"
-                ) as store:
-                    store.append("data", this_hour_df, format="table")
-                # we drop the last four values
-                df = df.drop(df.tail(4).index)
-                # we decrease the countdown
-                countdown -= 1
-                if countdown == 0:
-                    break
+                while True:
+                    prev_last_forecast_time = ""
+                    with pd.HDFStore(
+                        f"{save_path}{location}_{numbers_to_models[response.Model()]}_{countdown}.h5"
+                    ) as store:
+                        temp_df = store["data"]
+                        # turn the datetime into a datetime, we have to amend this as datetime is now the index
+                        temp_df["datetime"] = pd.to_datetime(temp_df.index)
+                        # we check if the last forecast time is the same as the previous last forecast time
+                        prev_last_forecast_time = temp_df["datetime"].max()
+                        if last_forecast_time == prev_last_forecast_time:
+                            print("No new data")
+                            break
+                        # we get every forecast that is newer than the last forecast time
+                        this_hour_df = df[
+                            df["datetime"] > prev_last_forecast_time
+                        ].copy()
+                        this_hour_df["save_time"] = now
+                        this_hour_df["save_time"] = this_hour_df[
+                            "save_time"
+                        ].dt.strftime("%Y-%m-%dT%H:%M:%S")
+                        # turn the datetime into a string
+                        this_hour_df["datetime"] = this_hour_df["datetime"].dt.strftime(
+                            "%Y-%m-%dT%H:%M:%S"
+                        )
+                        # we want the datetime to be the index
+                        this_hour_df = this_hour_df.set_index("datetime")
+                        print(this_hour_df.to_string())
+                        # we save the current hourly data to hdf5
+                        with pd.HDFStore(
+                            f"{save_path}{location}_{numbers_to_models[response.Model()]}_{countdown}.h5"
+                        ) as store:
+                            store.append("data", this_hour_df, format="table")
+                        # we drop the ones that we have already saved
+                        df = df.drop(df[df["datetime"] > prev_last_forecast_time].index)
+                        # we decrease the countdown
+                        countdown -= 1
+                        if countdown == 0:
+                            break
+            else:
+                while df.empty == False:
+                    print("first run")
+                    # we get the last four values as that is the hours_to_show's hour in the future
+                    this_hour_df = df.tail(4).copy()
+                    this_hour_df["save_time"] = now
+                    this_hour_df["save_time"] = this_hour_df["save_time"].dt.strftime(
+                        "%Y-%m-%dT%H:%M:%S"
+                    )
+                    # turn the datetime into a string
+                    this_hour_df["datetime"] = this_hour_df["datetime"].dt.strftime(
+                        "%Y-%m-%dT%H:%M:%S"
+                    )
+                    this_hour_df = this_hour_df.set_index("datetime")
+                    print(this_hour_df.to_string())
+                    # we save the current hourly data to hdf5
+                    with pd.HDFStore(
+                        f"{save_path}{location}_{numbers_to_models[response.Model()]}_{countdown}.h5"
+                    ) as store:
+                        store.append("data", this_hour_df, format="table")
+                    # we drop the last four values
+                    df = df.drop(df.tail(4).index)
+                    # we decrease the countdown
+                    countdown -= 1
+                    if countdown == 0:
+                        break
 
 
 if __name__ == "__main__":

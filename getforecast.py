@@ -18,12 +18,14 @@ from getstationdata import get_station_data
 def generate_labels(dates):
     labels = []
     previous_date = None
+    previous_hour = None
     for date in dates:
         if date.date() != previous_date:
-            labels.append(date.strftime("%Y-%m-%d %H:%M"))  # Show full date and time
+            labels.append(date.strftime("%H\n%Y-%m-%d"))  # Show full date and time
             previous_date = date.date()
-        else:
-            labels.append(date.strftime("%H:%M"))  # Show only time
+        elif date.hour != previous_hour:
+            labels.append(date.strftime("%H"))  # Show only time
+            previous_hour = date.hour
     return labels
 
 
@@ -82,6 +84,7 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
     responses = openmeteo.weather_api(url, params=params)
 
     mse_df = pd.DataFrame()
+    models_df = pd.DataFrame()
     # Process first location. Add a for-loop for multiple locations or weather models
     for response in responses:
         print(f"\nModel {numbers_to_models[response.Model()]}")
@@ -199,12 +202,39 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
                     # add the row to the dataframe
                     new_station_data.loc[idx] = row
             station_data_reindexed = new_station_data
-            
+
             df = df.join(station_data_reindexed["smooth_wind_avg"])
             df = df.join(station_data_reindexed["smooth_wind_min"])
             df = df.join(station_data_reindexed["smooth_wind_max"])
             df.reset_index(inplace=True)
             print(df.to_string())
+            # WARN: the icon_d2 model has faulty data for gusts in the past, so we need to correct it
+            if numbers_to_models[response.Model()] == "icon_d2":
+                # if we find a 0 wind speed, we need to correct the wind gusts, total 7 points, 3 before and 3 after
+                for i in range(4, len(df["wind_speed_10m"]) - 4):
+                    if df["wind_gusts_10m"][i] == 0:
+                        df.loc[i, "wind_gusts_10m"] = (
+                            df["wind_gusts_10m"][i - 4] + df["wind_gusts_10m"][i + 4]
+                        ) / 2
+                        df.loc[i + 2, "wind_gusts_10m"] = (
+                            df["wind_gusts_10m"][i] + df["wind_gusts_10m"][i + 4]
+                        ) / 2
+                        df.loc[i - 2, "wind_gusts_10m"] = (
+                            df["wind_gusts_10m"][i] + df["wind_gusts_10m"][i - 4]
+                        ) / 2
+                        df.loc[i - 1, "wind_gusts_10m"] = (
+                            df["wind_gusts_10m"][i] + df["wind_gusts_10m"][i - 2]
+                        ) / 2
+                        df.loc[i + 1, "wind_gusts_10m"] = (
+                            df["wind_gusts_10m"][i] + df["wind_gusts_10m"][i + 2]
+                        ) / 2
+                        df.loc[i + 3, "wind_gusts_10m"] = (
+                            df["wind_gusts_10m"][i + 2] + df["wind_gusts_10m"][i + 4]
+                        ) / 2
+                        df.loc[i - 3, "wind_gusts_10m"] = (
+                            df["wind_gusts_10m"][i - 2] + df["wind_gusts_10m"][i - 4]
+                        ) / 2
+
             if mse_df.empty:
                 mse_df["datetime"] = df["datetime"]
                 mse_df["date"] = df["date"]
@@ -233,62 +263,79 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
                 .mean()
             )
 
-            x_labels = generate_labels(df["datetime"][::4])
-            tick_positions = df["datetime"][::4]
-            tick_labels = x_labels
-            # plot the wind speed and gusts in one plot
-            plt.figure(figsize=(30, 5))
-            plt.plot(
-                df["datetime"],
-                df["wind_speed_10m"],
-                label="wind speed",
-                linestyle="dashed",
-                color="green",
-            )
-            plt.plot(
-                df["datetime"],
-                df["wind_gusts_10m"],
-                label="wind gusts",
-                linestyle="dashed",
-                color="red",
-            )
-            plt.plot(
-                df["datetime"],
-                df["smooth_wind_max"],
-                label="wind gusts",
-                linestyle="solid",
-                color="red",
-            )
-            plt.plot(
-                df["datetime"],
-                df["smooth_wind_min"],
-                label="wind minimum",
-                linestyle="solid",
-                color="blue",
-            )
-            plt.plot(
-                df["datetime"],
-                df["smooth_wind_avg"],
-                label="wind average",
-                linestyle="solid",
-                color="green",
-            )
-            plt.plot(
-                mse_df["datetime"],
-                mse_df[f"mse_smooth_{numbers_to_models[response.Model()]}"],
-                label=f"MSE {numbers_to_models[response.Model()]}",
-                linestyle="dotted",
-                color="black",
-            )
-            # add gridlines
-            plt.grid(True)
-            plt.xticks(tick_positions, tick_labels, rotation=45, ha="right", va="top")
-            plt.legend()
-            plt.title(f"{numbers_to_models[response.Model()]} wind speed and gusts")
-            plt.xlabel("Time")
-            plt.ylabel("Wind Speed [kn]")
-            # show the plot
-            plt.show()
+            models_df["datetime"] = df["datetime"]
+            models_df[f"{numbers_to_models[response.Model()]}_wind_speed_10m"] = df[
+                "wind_speed_10m"
+            ]
+            models_df[f"{numbers_to_models[response.Model()]}_wind_gusts_10m"] = df[
+                "wind_gusts_10m"
+            ]
+            models_df["smooth_wind_max"] = df["smooth_wind_max"]
+            models_df["smooth_wind_min"] = df["smooth_wind_min"]
+            models_df["smooth_wind_avg"] = df["smooth_wind_avg"]
+            models_df[f"{numbers_to_models[response.Model()]}_mse_smooth"] = mse_df[
+                f"mse_smooth_{numbers_to_models[response.Model()]}"
+            ]
+
+            # x_labels = generate_labels(df["datetime"][::4])
+            # tick_positions = df["datetime"][::4]
+            # tick_labels = x_labels
+            # # plot the wind speed and gusts in one plot
+            # plt.figure(figsize=(30, 5))
+            # plt.plot(
+            #     df["datetime"],
+            #     df["wind_speed_10m"],
+            #     label="wind speed",
+            #     linestyle="dashed",
+            #     color="green",
+            # )
+            # plt.plot(
+            #     df["datetime"],
+            #     df["wind_gusts_10m"],
+            #     label="wind gusts",
+            #     linestyle="dashed",
+            #     color="red",
+            # )
+            # plt.plot(
+            #     df["datetime"],
+            #     df["smooth_wind_max"],
+            #     label="wind gusts",
+            #     linestyle="solid",
+            #     color="red",
+            # )
+            # plt.plot(
+            #     df["datetime"],
+            #     df["smooth_wind_min"],
+            #     label="wind minimum",
+            #     linestyle="solid",
+            #     color="blue",
+            # )
+            # plt.plot(
+            #     df["datetime"],
+            #     df["smooth_wind_avg"],
+            #     label="wind average",
+            #     linestyle="solid",
+            #     color="green",
+            # )
+            # plt.plot(
+            #     mse_df["datetime"],
+            #     mse_df[f"mse_smooth_{numbers_to_models[response.Model()]}"],
+            #     label=f"MSE {numbers_to_models[response.Model()]}",
+            #     linestyle="dotted",
+            #     color="black",
+            # )
+            # # add gridlines
+            # plt.grid(True)
+            # plt.axhspan(15, 20, color="green", alpha=0.2)
+            # plt.axhspan(20, 25, color="orange", alpha=0.2)
+            # plt.axhspan(25, 30, color="red", alpha=0.2)
+            # plt.xticks(tick_positions, tick_labels, fontsize=10)
+            # plt.legend()
+            # plt.title(f"{numbers_to_models[response.Model()]} wind speed and gusts")
+            # plt.xlabel("Time")
+            # plt.ylabel("Wind Speed [kn]")
+            # # show the plot
+            # plt.show()
 
     # print(mse_df.to_string())
     # total mse
@@ -297,26 +344,114 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
         total_mse = mse_df[f"mse_{model}"].clip(upper=20).sum()
         print(f"Total MSE for {model}: {total_mse}")
     # plot the mean squared error
-    plt.figure(figsize=(10, 5))
-    colors = ["red", "blue", "green"]
+    print(models_df.to_string())
+    plt.figure(figsize=(30, 10))
+    colors = ["red", "green", "blue"]
+    # colors = ["lightskyblue", "limegreen", "orange"]
+    x_labels = generate_labels(models_df["datetime"][::4])
+    tick_positions = models_df["datetime"][::4]
+    tick_labels = x_labels
     for i, model in enumerate(models):
         plt.plot(
-            mse_df["datetime"],
-            mse_df[f"mse_smooth_{model}"],
+            models_df["datetime"],
+            models_df[f"{model}_wind_speed_10m"],
             label=f"{model}",
+            linestyle="solid",
+            color=colors[i],
+        )
+        plt.plot(
+            models_df["datetime"],
+            models_df[f"{model}_wind_gusts_10m"],
             linestyle="dashed",
             color=colors[i],
         )
+        # plt.plot(
+        #     models_df["datetime"],
+        #     models_df[f"{model}_mse_smooth"],
+        #     linestyle="dotted",
+        #     color=colors[i],
+        # )
+    plt.plot(
+        models_df["datetime"],
+        models_df["smooth_wind_avg"],
+        label="Avg",
+        linestyle="solid",
+        color="gray",
+    )
+    plt.plot(
+        models_df["datetime"],
+        models_df["smooth_wind_min"],
+        label="Min",
+        linestyle="dotted",
+        color="gray",
+    )
+    plt.plot(
+        models_df["datetime"],
+        models_df["smooth_wind_max"],
+        label="Max",
+        linestyle="dashed",
+        color="gray",
+    )
     # Add plot details
-    plt.xlabel("Date")
-    plt.ylabel("Mean Squared Error")
-    plt.title("MSE for Different Models Over Time")
-    plt.legend()
     plt.grid(True)
+    plt.axhspan(15, 20, color="green", alpha=0.2)
+    plt.axhspan(20, 25, color="orange", alpha=0.2)
+    plt.axhspan(25, 30, color="red", alpha=0.2)
+    plt.xticks(tick_positions, tick_labels, fontsize=8)
+    plt.legend()
+    plt.title(f"Wind forecast for {args.location}")
+    plt.xlabel("Time")
+    plt.ylabel("Wind Speed [kn]")
+    plt.show()
+
+    # plot the mean squared error
+    print(models_df.to_string())
+    plt.figure(figsize=(30, 10))
+    colors = ["red", "green", "blue"]
+    x_labels = generate_labels(models_df["datetime"][::4])
+    tick_positions = models_df["datetime"][::4]
+    tick_labels = x_labels
+    for i, model in enumerate(models):
+        # plt.plot(
+        #     models_df["datetime"],
+        #     models_df[f"{model}_wind_speed_10m"],
+        #     label=f"{model}",
+        #     linestyle="solid",
+        #     color=colors[i],
+        # )
+        # plt.plot(
+        #     models_df["datetime"],
+        #     models_df[f"{model}_wind_gusts_10m"],
+        #     linestyle="dashed",
+        #     color=colors[i],
+        # )
+        plt.plot(
+            models_df["datetime"],
+            models_df[f"{model}_mse_smooth"],
+            label=f"MSE {model}",
+            linestyle="dotted",
+            color=colors[i],
+        )
+    plt.grid(True)
+    plt.xticks(tick_positions, tick_labels, fontsize=8)
+    plt.legend()
+    plt.title(f"MSE for {args.location}")
+    plt.xlabel("Time")
+    plt.ylabel("MSE")
     plt.show()
 
 
 def parse_args():
+    def intrange(min, max):
+        def check(value):
+            ivalue = int(value)
+            if min <= ivalue <= max:
+                return ivalue
+            else:
+                raise argparse.ArgumentTypeError(f"{value} is not in range {min}-{max}")
+
+        return check
+
     parser = argparse.ArgumentParser(description="Get forecast data from Open-Meteo")
     parser.add_argument(
         "-l",
@@ -336,8 +471,8 @@ def parse_args():
     parser.add_argument(
         "-p",
         "--past_hours",
-        type=int,
-        help="Number of past hours to show in the forecast",
+        type=intrange(0, 2208),
+        help="Number of past hours to show in the forecast, must be between 0 and 2208",
         required=False,
         default=18,
     )
@@ -349,5 +484,6 @@ if __name__ == "__main__":
     # past_count_of_15_minutes = 100  # max is 8832
 
     args = parse_args()
+    print(args.past_hours)
     past_count_of_15_minutes = args.past_hours * 4
     get_forecast(args.location, args.hours_to_show, past_count_of_15_minutes)
