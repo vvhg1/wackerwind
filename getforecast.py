@@ -1,13 +1,17 @@
 import openmeteo_requests
+import pandas
 
 import requests_cache
 import pandas as pd
+import numpy as np
 from retry_requests import retry
 import matplotlib.pyplot as plt
 import datetime
 import argparse
 
 from getstationdata import get_station_data
+from getwaterlevel import get_waterlevel
+from getsun import getsunrise, getsunset
 
 # import debugpy
 
@@ -17,33 +21,59 @@ from getstationdata import get_station_data
 
 def generate_labels(dates):
     labels = []
+    tick_positions = []
     previous_date = None
     previous_hour = None
     for date in dates:
         if date.date() != previous_date:
             labels.append(date.strftime("%H\n%Y-%m-%d"))  # Show full date and time
+            tick_positions.append(date)
             previous_date = date.date()
         elif date.hour != previous_hour:
             labels.append(date.strftime("%H"))  # Show only time
+            tick_positions.append(date)
             previous_hour = date.hour
-    return labels
+    return tick_positions, labels
 
 
-def get_forecast(location, hours_to_show, past_count_of_15_minutes):
+def get_forecast(location, weatherstation, hours_to_show, past_count_of_15_minutes):
     # Setup the Open-Meteo API client with cache and retry on error
+    print(f"Getting forecast for {location}")
     cache_session = requests_cache.CachedSession(".cache", expire_after=3600)
     retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
     openmeteo = openmeteo_requests.Client(session=retry_session)
 
-    models = ["arome_france_hd", "icon_d2", "metno_seamless"]
+    models = [
+        "arome_france_hd",
+        "icon_d2",
+        "metno_seamless",
+        "dmi_harmonie_arome_europe",
+        # "knmi_harmonie_arome_netherlands",
+        # "ukmo_uk_deterministic_2km",
+    ]
+    # models = ["arome_france_hd", "icon_d2", "metno_seamless"]
     # parse the location
     # match anything starting with wack to a specific location
     if location.lower().startswith("wac") or location.lower().startswith("wak"):
         latitude = 54.75455
         longitude = 9.87333
+        waterlevel = "22b7dcb3-8c42-4f71-9191-49143ba3a828"  # kalkgrund
     elif location.lower().startswith("fal"):
         latitude = 54.77019
         longitude = 9.965711
+        waterlevel = "22b7dcb3-8c42-4f71-9191-49143ba3a828"  # kalkgrund
+    elif location.lower().startswith("ohr"):
+        latitude = 54.760344
+        longitude = 9.837195
+        waterlevel = "22b7dcb3-8c42-4f71-9191-49143ba3a828"  # kalkgrund
+    elif location.lower().startswith("maas"):
+        latitude = 54.683032
+        longitude = 10.001216
+        waterlevel = "b09f2243-60f0-469a-8f3b-0ea6abc83267"  # kappeln
+    elif location.lower().startswith("rom"):
+        latitude = 55.154645
+        longitude = 8.474347
+        waterlevel = "5e92d73f-e4ea-42c1-9f98-91536c17cdff"  # Römö
     else:
         raise ValueError("Location not supported")
 
@@ -80,43 +110,46 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
         11: "arome_france_hd",  # 1.5km, quarter hourly, every hour updated
         75: "metno_seamless",  # 1km, hourly, every hour updated
         23: "icon_d2",  # 2kn, hourly, every hour updated
+        74: "dmi_harmonie_arome_europe",  # 2km, hourly, every 3 hours updated
+        72: "knmi_harmonie_arome_netherlands",  # 2km, hourly, every hour updated
+        81: "ukmo_uk_deterministic_2km",  # 2km, hourly, every hour updated
     }
     responses = openmeteo.weather_api(url, params=params)
 
     mse_df = pd.DataFrame()
     models_df = pd.DataFrame()
+    now = datetime.datetime.now()
+    # yesterday = now - datetime.timedelta(days=1)
+    from_time = now - datetime.timedelta(minutes=past_count_of_15_minutes * 15)
+    station_data = get_station_data(weatherstation, from_time, now, sliding_window=15)
+    print("got station data")
+    # print(station_data)
+    waterlevels = get_waterlevel(waterlevel)
+    # convert the waterlevels to a dataframe
+    waterlevels_df = pd.DataFrame(waterlevels)
+    # rename timestamp to datetime
+    waterlevels_df["roundedtimestamp"] = pd.to_datetime(
+        waterlevels_df["timestamp"], utc=True
+    ).dt.ceil("15min")
+    waterlevels_df["roundedtimestamp"] = waterlevels_df["roundedtimestamp"].dt.strftime(
+        "%Y-%m-%dT%H:%M:%S"
+    )
+    waterlevels_df["datetime"] = pd.to_datetime(waterlevels_df["roundedtimestamp"])
+    waterlevels_df = waterlevels_df.drop_duplicates(subset=["datetime"], keep="last")
+    # make unique, keep the last occurence
+    waterlevels_df.set_index("datetime", inplace=True)
+    # we need to round the index UP to the next 15 minutes
+    # combine the two dataframes, we need to match the time, if the station data is missing, use the last value before the time being processed
+    # correct station_data datetime to be in the same timezone as df
+    station_data["datetime"] = pd.to_datetime(station_data["datetime"])
+    station_data.set_index("datetime", inplace=False)
     # Process first location. Add a for-loop for multiple locations or weather models
     for response in responses:
         print(f"\nModel {numbers_to_models[response.Model()]}")
-        print(f"Coordinates {response.Latitude()}°N {response.Longitude()}°E")
+        # print(f"Coordinates {response.Latitude()}°N {response.Longitude()}°E")
         # print(f"Elevation {response.Elevation()} m asl")
         # print(f"Current {response.Current()}")
         # print(f"Daily {response.Daily()}")
-
-        hourly = response.Hourly()
-        if hourly:
-            hourly_apparent_temperature = hourly.Variables(0).ValuesAsNumpy()
-            hourly_precipitation = hourly.Variables(1).ValuesAsNumpy()
-            hourly_wind_speed_10m = hourly.Variables(2).ValuesAsNumpy()
-            hourly_wind_direction_10m = hourly.Variables(3).ValuesAsNumpy()
-            hourly_wind_gusts_10m = hourly.Variables(4).ValuesAsNumpy()
-
-            hourly_data = {
-                "date": pd.date_range(
-                    start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
-                    end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
-                    freq=pd.Timedelta(seconds=hourly.Interval()),
-                    inclusive="left",
-                )
-            }
-            hourly_data["apparent_temperature"] = hourly_apparent_temperature
-            hourly_data["precipitation"] = hourly_precipitation
-            hourly_data["wind_speed_10m"] = hourly_wind_speed_10m
-            hourly_data["wind_direction_10m"] = hourly_wind_direction_10m
-            hourly_data["wind_gusts_10m"] = hourly_wind_gusts_10m
-
-            hourly_dataframe = pd.DataFrame(data=hourly_data)
-            print(hourly_dataframe.to_string())
 
         minutely_15 = response.Minutely15()
         if minutely_15:
@@ -154,21 +187,31 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
             # convert the date to iso format
             df["date"] = df["date"].dt.strftime("%Y-%m-%dT%H:%M:%S")
             df["datetime"] = pd.to_datetime(df["date"])
+            timezone = df["datetime"].dt.tz
             df["date"] = df["datetime"].dt.date
             df["time"] = df["datetime"].dt.time
 
             # print(df.to_string())
-            df.to_csv(f"{numbers_to_models[response.Model()]}_minutely_15.csv")
+            # df.to_csv(f"{numbers_to_models[response.Model()]}_minutely_15.csv")
 
             # get the station data
-            now = datetime.datetime.now()
-            yesterday = now - datetime.timedelta(days=1)
-            from_time = now - datetime.timedelta(minutes=past_count_of_15_minutes * 15)
-            station_data = get_station_data(from_time, now, sliding_window=15)
-            # combine the two dataframes, we need to match the time, if the station data is missing, use the last value before the time being processed
+            # TODO: better to get the station data indexed to quater hourly already
             df.set_index("datetime", inplace=True)
-            station_data.set_index("datetime", inplace=False)
+            station_data["datetime"] = station_data["datetime"].dt.tz_localize(timezone)
             station_data_reindexed = station_data.reindex(df.index, method=None)
+            pandas.set_option("future.no_silent_downcasting", True)
+            station_data_reindexed.replace(pd.NA, np.nan, inplace=True)
+            waterlevels_reindexed = waterlevels_df.reindex(df.index, method=None)
+            waterlevels_reindexed = waterlevels_reindexed.rename(
+                columns={"value": "waterlevel"}
+            )
+            # waterlevel substract 500 to get the height in cm
+            waterlevels_reindexed["waterlevel"] = (
+                waterlevels_reindexed["waterlevel"] - 500
+            )
+            waterlevels_reindexed["waterlevel"] = (
+                waterlevels_reindexed["waterlevel"] / 10
+            )
             # where we have no measurements, get the closest measurement from station_data, but only if the measurement is not older than the previous datetime in station_data_reindexed
             new_station_data = pd.DataFrame(columns=station_data_reindexed.columns)
 
@@ -187,17 +230,21 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
                         continue
                     if this_datetime > now:
                         # add a nan to the dataframe
-                        new_station_data.loc[idx, "smooth_wind_avg"] = pd.NA
-                        new_station_data.loc[idx, "smooth_wind_min"] = pd.NA
-                        new_station_data.loc[idx, "smooth_wind_max"] = pd.NA
+                        new_station_data.loc[idx, "smooth_wind_avg"] = np.nan
+                        new_station_data.loc[idx, "smooth_wind_min"] = np.nan
+                        new_station_data.loc[idx, "smooth_wind_max"] = np.nan
                         continue
                     time_difference = (
                         this_datetime - station_data_row.iloc[0]["datetime"]
                     )
                     # if it is more than 15 minutes old
-                    if time_difference > pd.Timedelta(minutes=15):
-                        df.drop(idx, inplace=True)
-                        continue
+                    # if time_difference > pd.Timedelta(minutes=15):
+                    #     new_station_data.loc[idx, "smooth_wind_avg"] = np.nan
+                    #     new_station_data.loc[idx, "smooth_wind_min"] = np.nan
+                    #     new_station_data.loc[idx, "smooth_wind_max"] = np.nan
+                    #     # print(f"Dropping {idx}")
+                    #     # df.drop(idx, inplace=True)
+                    #     continue
                     row = station_data_row.iloc[0]
                     # add the row to the dataframe
                     new_station_data.loc[idx] = row
@@ -206,8 +253,13 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
             df = df.join(station_data_reindexed["smooth_wind_avg"])
             df = df.join(station_data_reindexed["smooth_wind_min"])
             df = df.join(station_data_reindexed["smooth_wind_max"])
+            df = df.join(waterlevels_reindexed["waterlevel"])
+            print("data joined")
+            print(df)
             df.reset_index(inplace=True)
-            print(df.to_string())
+            print("data reset")
+            print(df)
+            # print(df.to_string())
             # WARN: the icon_d2 model has faulty data for gusts in the past, so we need to correct it
             if numbers_to_models[response.Model()] == "icon_d2":
                 # if we find a 0 wind speed, we need to correct the wind gusts, total 7 points, 3 before and 3 after
@@ -263,7 +315,20 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
                 .mean()
             )
 
+            if not models_df.empty:
+                # check that we have the same number of rows
+                if len(models_df) > len(df):
+                    # check the first datetime
+                    if models_df["datetime"].iloc[0] != df["datetime"].iloc[0]:
+                        # if the first datetime is different, we need to prepend an empty row to df
+                        na_row = pd.DataFrame(
+                            [[pd.NA] * len(df.columns)], columns=df.columns
+                        )
+                        na_row["datetime"] = models_df["datetime"].iloc[0]
+                        df = pd.concat([na_row, df])
+
             models_df["datetime"] = df["datetime"]
+            models_df["waterlevel"] = df["waterlevel"]
             models_df[f"{numbers_to_models[response.Model()]}_wind_speed_10m"] = df[
                 "wind_speed_10m"
             ]
@@ -277,80 +342,69 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
                 f"mse_smooth_{numbers_to_models[response.Model()]}"
             ]
 
-            # x_labels = generate_labels(df["datetime"][::4])
-            # tick_positions = df["datetime"][::4]
-            # tick_labels = x_labels
-            # # plot the wind speed and gusts in one plot
-            # plt.figure(figsize=(30, 5))
-            # plt.plot(
-            #     df["datetime"],
-            #     df["wind_speed_10m"],
-            #     label="wind speed",
-            #     linestyle="dashed",
-            #     color="green",
-            # )
-            # plt.plot(
-            #     df["datetime"],
-            #     df["wind_gusts_10m"],
-            #     label="wind gusts",
-            #     linestyle="dashed",
-            #     color="red",
-            # )
-            # plt.plot(
-            #     df["datetime"],
-            #     df["smooth_wind_max"],
-            #     label="wind gusts",
-            #     linestyle="solid",
-            #     color="red",
-            # )
-            # plt.plot(
-            #     df["datetime"],
-            #     df["smooth_wind_min"],
-            #     label="wind minimum",
-            #     linestyle="solid",
-            #     color="blue",
-            # )
-            # plt.plot(
-            #     df["datetime"],
-            #     df["smooth_wind_avg"],
-            #     label="wind average",
-            #     linestyle="solid",
-            #     color="green",
-            # )
-            # plt.plot(
-            #     mse_df["datetime"],
-            #     mse_df[f"mse_smooth_{numbers_to_models[response.Model()]}"],
-            #     label=f"MSE {numbers_to_models[response.Model()]}",
-            #     linestyle="dotted",
-            #     color="black",
-            # )
-            # # add gridlines
-            # plt.grid(True)
-            # plt.axhspan(15, 20, color="green", alpha=0.2)
-            # plt.axhspan(20, 25, color="orange", alpha=0.2)
-            # plt.axhspan(25, 30, color="red", alpha=0.2)
-            # plt.xticks(tick_positions, tick_labels, fontsize=10)
-            # plt.legend()
-            # plt.title(f"{numbers_to_models[response.Model()]} wind speed and gusts")
-            # plt.xlabel("Time")
-            # plt.ylabel("Wind Speed [kn]")
-            # # show the plot
-            # plt.show()
-
-    # print(mse_df.to_string())
-    # total mse
+            models_df[f"{numbers_to_models[response.Model()]}_wind_dir_U"] = [
+                -np.sin(np.deg2rad(x)) for x in df["wind_direction_10m"]
+            ]
+            models_df[f"{numbers_to_models[response.Model()]}_wind_dir_V"] = [
+                -np.cos(np.deg2rad(x)) for x in df["wind_direction_10m"]
+            ]
     # cap the mse at 20
     for i, model in enumerate(models):
         total_mse = mse_df[f"mse_{model}"].clip(upper=20).sum()
         print(f"Total MSE for {model}: {total_mse}")
     # plot the mean squared error
-    print(models_df.to_string())
+    # print(models_df.to_string())
+    # get sunrise and sunset times
+    sunrise = getsunrise("Flensburg", models_df["datetime"].iloc[0]).replace(
+        tzinfo=None
+    )
+    sunset = getsunset("Flensburg", models_df["datetime"].iloc[0]).replace(tzinfo=None)
+    sunrise_time_of_day = sunrise.time()
+    sunset_time_of_day = sunset.time()
+    sunset = getsunset("Flensburg", models_df["datetime"].iloc[0]).replace(tzinfo=None)
+    print(f"Sunrise: {sunrise}")
+    print(f"Sunset: {sunset}")
+    print("models_df")
+    print(models_df)
+    # we drop the first rows if they are not on the full hour
+    while models_df["datetime"].iloc[0].minute != 0:
+        # drop the first row
+        models_df.drop(models_df.index[0], inplace=True)
+    print("dropped first rows")
+    print(models_df)
     plt.figure(figsize=(30, 10))
-    colors = ["red", "green", "blue"]
+    colors = [
+        "red",
+        "green",
+        "blue",
+        "orange",
+        "purple",
+        "teal",
+        "pink",
+        "brown",
+        "darkgreen",
+    ]
+    # add a column with a boolean value, if the time is between sunrise and sunset, the value is True
+    models_df["is_night"] = models_df["datetime"].apply(
+        lambda x: (
+            True
+            if x.time() < sunrise_time_of_day or x.time() > sunset_time_of_day
+            else False
+        )
+    )
+    # print(models_df)
+    # shade the night
+    plt.fill_between(
+        models_df["datetime"],
+        plt.ylim()[0],
+        models_df["smooth_wind_max"].max(),
+        where=models_df["is_night"],
+        color="gray",
+        alpha=0.2,
+    )
+
     # colors = ["lightskyblue", "limegreen", "orange"]
-    x_labels = generate_labels(models_df["datetime"][::4])
-    tick_positions = models_df["datetime"][::4]
-    tick_labels = x_labels
+    tick_positions, tick_labels = generate_labels(models_df["datetime"][::4])
     for i, model in enumerate(models):
         plt.plot(
             models_df["datetime"],
@@ -371,6 +425,19 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
         #     linestyle="dotted",
         #     color=colors[i],
         # )
+        plt.quiver(
+            models_df["datetime"][::4],
+            np.zeros(len(models_df["datetime"][::4])),
+            models_df[f"{model}_wind_dir_U"][::4],
+            models_df[f"{model}_wind_dir_V"][::4],
+            units="width",
+            width=0.0015,
+            pivot="mid",
+            scale=70,
+            headlength=5,
+            headwidth=5,
+            color=colors[i],
+        )
     plt.plot(
         models_df["datetime"],
         models_df["smooth_wind_avg"],
@@ -392,6 +459,14 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
         linestyle="dashed",
         color="gray",
     )
+    # plot the waterlevel on a separate scale
+    plt.plot(
+        models_df["datetime"],
+        models_df["waterlevel"],
+        label="Waterlevel",
+        linestyle="solid",
+        color="blue",
+    )
     # Add plot details
     plt.grid(True)
     plt.axhspan(15, 20, color="green", alpha=0.2)
@@ -402,15 +477,16 @@ def get_forecast(location, hours_to_show, past_count_of_15_minutes):
     plt.title(f"Wind forecast for {args.location}")
     plt.xlabel("Time")
     plt.ylabel("Wind Speed [kn]")
+    # save the figure
+    plt.savefig(f"../../Downloads/{args.location}.png")
     plt.show()
 
     # plot the mean squared error
-    print(models_df.to_string())
+    # print(models_df.to_string())
     plt.figure(figsize=(30, 10))
-    colors = ["red", "green", "blue"]
-    x_labels = generate_labels(models_df["datetime"][::4])
-    tick_positions = models_df["datetime"][::4]
-    tick_labels = x_labels
+    # x_labels = generate_labels(models_df["datetime"])
+    # tick_positions = models_df["datetime"][::4]
+    # tick_labels = x_labels
     for i, model in enumerate(models):
         # plt.plot(
         #     models_df["datetime"],
@@ -461,6 +537,13 @@ def parse_args():
         required=True,
     )
     parser.add_argument(
+        "-s",
+        "--weather_station",
+        type=str,
+        help="Weather station to get the measurements from",
+        required=True,
+    )
+    parser.add_argument(
         "-t",
         "--hours_to_show",
         type=int,
@@ -484,6 +567,11 @@ if __name__ == "__main__":
     # past_count_of_15_minutes = 100  # max is 8832
 
     args = parse_args()
-    print(args.past_hours)
+    # print(args.past_hours)
     past_count_of_15_minutes = args.past_hours * 4
-    get_forecast(args.location, args.hours_to_show, past_count_of_15_minutes)
+    get_forecast(
+        args.location,
+        args.weather_station,
+        args.hours_to_show,
+        past_count_of_15_minutes,
+    )

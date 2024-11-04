@@ -15,7 +15,14 @@ def save_forecast(location, hours_to_show):
     openmeteo = openmeteo_requests.Client(session=retry_session)
     save_path = "/home/vhg/repos/wackerwind/data/forecasts/"
 
-    models = ["arome_france_hd", "icon_d2", "metno_seamless"]
+    models = [
+        "arome_france_hd",
+        "icon_d2",
+        "metno_seamless",
+        "dmi_harmonie_arome_europe",
+        "knmi_harmonie_arome_netherlands",
+        "ukmo_uk_deterministic_2km",
+    ]
     # parse the location
     # match anything starting with wack to a specific location
     if location.lower().startswith("wac") or location.lower().startswith("wak"):
@@ -60,6 +67,9 @@ def save_forecast(location, hours_to_show):
         11: "arome_france_hd",  # 1.5km, quarter hourly, every hour updated
         75: "metno_seamless",  # 1km, hourly, every hour updated
         23: "icon_d2",  # 2kn, hourly, every hour updated
+        74: "dmi_harmonie_arome_europe",  # 2km, hourly, every 3 hours updated
+        72: "knmi_harmonie_arome_netherlands",  # 2km, hourly, every hour updated
+        81: "ukmo_uk_deterministic_2km",  # 2km, hourly, every hour updated
     }
     responses = openmeteo.weather_api(url, params=params)
 
@@ -67,9 +77,6 @@ def save_forecast(location, hours_to_show):
     for response in responses:
         print(f"\nModel {numbers_to_models[response.Model()]}")
         print(f"Coordinates {response.Latitude()}°N {response.Longitude()}°E")
-        # print(f"Elevation {response.Elevation()} m asl")
-        # print(f"Current {response.Current()}")
-        # print(f"Daily {response.Daily()}")
 
         minutely_15 = response.Minutely15()
         if minutely_15:
@@ -94,12 +101,6 @@ def save_forecast(location, hours_to_show):
             minutely_15_data["precipitation"] = minutely_15_precipitation
 
             df = pd.DataFrame(data=minutely_15_data)
-            # if we have wind_gusts_10m of 0 and wind_speed_10m of not 0, we need to set wind_gusts_10m to the previous value
-            # print(df.to_string())
-            # df_mask = df["wind_gusts_10m"] == 0
-            # df["wind_gusts_10m"] = df["wind_gusts_10m"].mask(
-            #     df_mask, df["wind_gusts_10m"].ffill()
-            # )
 
             # we need to correct the date and time to the correct timezone
             df["date"] = df["date"] + pd.Timedelta(seconds=response.UtcOffsetSeconds())
