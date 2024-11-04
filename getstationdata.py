@@ -154,9 +154,9 @@ def get_station_data_wak(
 
 def main():
     now = datetime.datetime.now()
-    hours_to_show = 2
+    hours_to_show = 24
     from_time = now - datetime.timedelta(hours=hours_to_show)
-    df = get_station_data("wak", from_time, now)
+    df = get_station_data("keg", from_time, now)
 
     # print(df[10:].to_string())
 
