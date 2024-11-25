@@ -6,7 +6,6 @@ import json
 import datetime
 import matplotlib.pyplot as plt
 import typing
-import numpy as np
 
 
 def generate_labels(dates: typing.List[datetime.datetime]) -> typing.List[str]:
@@ -28,36 +27,37 @@ def get_station_data(
     sliding_window: int = 1,
 ) -> pd.DataFrame:
     if station == "wak":
-        return get_station_data_wak("wak", from_date, to_date, sliding_window)
-    if station == "kol":
-        return get_station_data_wak("kol", from_date, to_date, sliding_window)
+        return get_station_data_wak(from_date, to_date, sliding_window)
     elif station == "keg":
-        return get_station_data_meteostat("06119", from_date, to_date, sliding_window)
-    elif station == "olp":
-        return get_station_data_meteostat("10042", from_date, to_date, sliding_window)
-    elif station == "lis":
-        return get_station_data_meteostat(
-            "10020", from_date, to_date, sliding_window
-        )  # List/Sylt
+        return get_station_data_keg(from_date, to_date, sliding_window)
     else:
         # empty dataframe
         return pd.DataFrame()
 
 
-def get_station_data_meteostat(
-    station: str,
-    from_date: datetime.datetime,
-    to_date: datetime.datetime,
-    sliding_window: int = 1,
+def get_station_data_keg(
+    from_date: datetime.datetime, to_date: datetime.datetime, sliding_window: int = 1
 ) -> pd.DataFrame:
-    print(f"Getting station data for keg")
+    #   curl 'https://d.meteostat.net/app/proxy/stations/hourly?station=06119&tz=Europe/Copenhagen&start=2024-09-22&end=2024-10-02' \
+    # -H 'authority: d.meteostat.net' \
+    # -H 'accept: */*' \
+    # -H 'accept-language: en-US,en;q=0.9' \
+    # -H 'dnt: 1' \
+    # -H 'origin: https://meteostat.net' \
+    # -H 'referer: https://meteostat.net/' \
+    # -H 'sec-fetch-dest: empty' \
+    # -H 'sec-fetch-mode: cors' \
+    # -H 'sec-fetch-site: same-site' \
+    # -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; rv:102.0) Gecko/20100101 Firefox/102.0' \
+    # --compressed
     url = "https://d.meteostat.net/app/proxy/stations/hourly"
     params = {
-        "station": station,
+        "station": "06119",
         "tz": "Europe/Copenhagen",
         "start": f"{from_date.strftime('%Y-%m-%d')}",
         "end": f"{to_date.strftime('%Y-%m-%d')}",
     }
+    print(params["end"])
     # Updated headers
     headers = {
         "authority": "d.meteostat.net",
@@ -70,52 +70,28 @@ def get_station_data_meteostat(
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-site",
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; rv:102.0) Gecko/20100101 Firefox/102.0",
+        "accept-encoding": "gzip, deflate, br",
         "connection": "keep-alive",
     }
     session = requests.Session()
     session.headers.update(headers)
     response = session.get(url, params=params)
+    print(response.text)
     station_data = response.json()
-    df = pd.DataFrame(station_data["data"])
-    df = df.rename(
-        columns={
-            "wspd": "wind_avg",
-            "wpgt": "wind_max",
-            "wdir": "wind_dir",
-            "temp": "temperature",
-        }
-    )
-    # convert from km/h to kn
-    df["wind_avg"] = df["wind_avg"] / 1.852
-    df["wind_max"] = df["wind_max"] / 1.852
-    # fill min with zeros as we don't have it
-    df["wind_min"] = 0
-    df["datetime"] = pd.to_datetime(df["time"], utc=True)
-    df["date"] = df["datetime"].dt.date
-    df["time"] = df["datetime"].dt.time
-    df["smooth_wind_avg"] = df["wind_avg"]
-    df["smooth_wind_max"] = df["wind_max"]
-    df["smooth_wind_min"] = df["wind_min"]
+    print(station_data)
+    exit()
+    df = pd.DataFrame(station_data)
     return df
 
 
 def get_station_data_wak(
-    station: str,
-    from_date: datetime.datetime,
-    to_date: datetime.datetime,
-    sliding_window: int = 1,
+    from_date: datetime.datetime, to_date: datetime.datetime, sliding_window: int = 1
 ) -> pd.DataFrame:
 
-    print(f"Getting station data for wak")
     url = "https://www.windguru.cz/int/iapi.php"
-    id_station = "3737"
-    if station == "wak":
-        id_station = "3737"
-    elif station == "kol":
-        id_station = "3846"
     params = {
         "q": "station_data",
-        "id_station": id_station,
+        "id_station": "3737",
         # "from": f"{one_year_ago}T05:00:20.000Z",
         "from": f"{from_date.strftime('%Y-%m-%dT%H:%M:%S')}",
         "to": f"{to_date.strftime('%Y-%m-%dT%H:%M:%S')}",
@@ -145,10 +121,10 @@ def get_station_data_wak(
 
     # Extract the data from the JSON response
     station_data = response.json()
-    # print(station_data)
 
     # Create a dataframe from the data
     df = pd.DataFrame(station_data)
+    print(df)
     # wiind_avg and wind_min are mixed up
     df = df.rename(columns={"wind_avg": "wind_min", "wind_min": "wind_avg"})
     # print(df.to_string())
@@ -158,25 +134,21 @@ def get_station_data_wak(
     df["smooth_wind_avg"] = df["wind_avg"].rolling(window=sliding_window).mean()
     df["smooth_wind_min"] = df["wind_min"].rolling(window=sliding_window).min()
     df["smooth_wind_max"] = df["wind_max"].rolling(window=sliding_window).max()
-    # print(df.to_string())
     return df
 
 
 def main():
     now = datetime.datetime.now()
-    hours_to_show = 12
-    # show the 09.30.2024
-    date_to_show = datetime.datetime(2024, 10, 13, 19, 30)
-    now = date_to_show
+    hours_to_show = 24
     from_time = now - datetime.timedelta(hours=hours_to_show)
-    df = get_station_data("wak", from_time, now)
+    df = get_station_data("keg", from_time, now)
 
     # print(df[10:].to_string())
 
     # here we show the last 20 hours, not the first 20 hours
     x_labels = generate_labels(df["datetime"][-hours_to_show * 60 :])
-    tick_positions = df["datetime"][-hours_to_show * 60 :: 2]
-    tick_labels = x_labels[::2]
+    tick_positions = df["datetime"][-hours_to_show * 60 :: 20]
+    tick_labels = x_labels[::20]
     # plot the wind speed and gusts in one plot
     plt.figure(figsize=(10, 5))
     plt.plot(

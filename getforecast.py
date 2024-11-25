@@ -58,6 +58,10 @@ def get_forecast(location, weatherstation, hours_to_show, past_count_of_15_minut
         latitude = 54.75455
         longitude = 9.87333
         waterlevel = "22b7dcb3-8c42-4f71-9191-49143ba3a828"  # kalkgrund
+    elif location.lower().startswith("sch"):
+        latitude = 54.86288
+        longitude = 9.56499
+        waterlevel = "22b7dcb3-8c42-4f71-9191-49143ba3a828"  # kalkgrund
     elif location.lower().startswith("fal"):
         latitude = 54.77019
         longitude = 9.965711
@@ -115,6 +119,7 @@ def get_forecast(location, weatherstation, hours_to_show, past_count_of_15_minut
         81: "ukmo_uk_deterministic_2km",  # 2km, hourly, every hour updated
     }
     responses = openmeteo.weather_api(url, params=params)
+    print(responses)
 
     mse_df = pd.DataFrame()
     models_df = pd.DataFrame()
